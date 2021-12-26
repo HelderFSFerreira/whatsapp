@@ -1,5 +1,5 @@
 // mautrix-whatsapp - A Matrix-WhatsApp puppeting bridge.
-// Copyright (C) 2020 Tulir Asokan
+// Copyright (C) 2021 Tulir Asokan
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"maunium.net/go/maulogger/v2"
+
+	"go.mau.fi/whatsmeow/types"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
@@ -50,12 +52,16 @@ func NewMatrixHandler(bridge *Bridge) *MatrixHandler {
 	bridge.EventProcessor.On(event.EventMessage, handler.HandleMessage)
 	bridge.EventProcessor.On(event.EventEncrypted, handler.HandleEncrypted)
 	bridge.EventProcessor.On(event.EventSticker, handler.HandleMessage)
+	bridge.EventProcessor.On(event.EventReaction, handler.HandleReaction)
 	bridge.EventProcessor.On(event.EventRedaction, handler.HandleRedaction)
 	bridge.EventProcessor.On(event.StateMember, handler.HandleMembership)
 	bridge.EventProcessor.On(event.StateRoomName, handler.HandleRoomMetadata)
 	bridge.EventProcessor.On(event.StateRoomAvatar, handler.HandleRoomMetadata)
 	bridge.EventProcessor.On(event.StateTopic, handler.HandleRoomMetadata)
 	bridge.EventProcessor.On(event.StateEncryption, handler.HandleEncryption)
+	bridge.EventProcessor.On(event.EphemeralEventPresence, handler.HandlePresence)
+	bridge.EventProcessor.On(event.EphemeralEventReceipt, handler.HandleReceipt)
+	bridge.EventProcessor.On(event.EphemeralEventTyping, handler.HandleTyping)
 	return handler
 }
 
@@ -94,6 +100,13 @@ func (mx *MatrixHandler) joinAndCheckMembers(evt *event.Event, intent *appservic
 	return members
 }
 
+func (mx *MatrixHandler) sendNoticeWithMarkdown(roomID id.RoomID, message string) (*mautrix.RespSendEvent, error) {
+	intent := mx.as.BotIntent()
+	content := format.RenderMarkdown(message, true, false)
+	content.MsgType = event.MsgNotice
+	return intent.SendMessageEvent(roomID, event.EventMessage, content)
+}
+
 func (mx *MatrixHandler) HandleBotInvite(evt *event.Event) {
 	intent := mx.as.BotIntent()
 
@@ -114,30 +127,25 @@ func (mx *MatrixHandler) HandleBotInvite(evt *event.Event) {
 		return
 	}
 
-	if evt.RoomID == mx.bridge.Config.Bridge.Relaybot.ManagementRoom {
-		_, _ = intent.SendNotice(evt.RoomID, "This is the relaybot management room. Send `!wa help` to get a list of commands.")
-		mx.log.Debugln("Joined relaybot management room", evt.RoomID, "after invite from", evt.Sender)
-		return
-	}
+	_, _ = mx.sendNoticeWithMarkdown(evt.RoomID, mx.bridge.Config.Bridge.ManagementRoomText.Welcome)
 
-	hasPuppets := false
-	for mxid, _ := range members.Joined {
-		if mxid == intent.UserID || mxid == evt.Sender {
-			continue
-		} else if _, ok := mx.bridge.ParsePuppetMXID(mxid); ok {
-			hasPuppets = true
-			continue
-		}
-		mx.log.Debugln("Leaving multi-user room", evt.RoomID, "after accepting invite from", evt.Sender)
-		_, _ = intent.SendNotice(evt.RoomID, "This bridge is user-specific, please don't invite me into rooms with other users.")
-		_, _ = intent.LeaveRoom(evt.RoomID)
-		return
-	}
-
-	if !hasPuppets && (len(user.ManagementRoom) == 0 || evt.Content.AsMember().IsDirect) {
+	if len(members.Joined) == 2 && (len(user.ManagementRoom) == 0 || evt.Content.AsMember().IsDirect) {
 		user.SetManagementRoom(evt.RoomID)
-		_, _ = intent.SendNotice(user.ManagementRoom, "This room has been registered as your bridge management/status room. Send `help` to get a list of commands.")
+		_, _ = intent.SendNotice(user.ManagementRoom, "This room has been registered as your bridge management/status room.")
 		mx.log.Debugln(evt.RoomID, "registered as a management room with", evt.Sender)
+	}
+
+	if evt.RoomID == user.ManagementRoom {
+		if user.HasSession() {
+			_, _ = mx.sendNoticeWithMarkdown(evt.RoomID, mx.bridge.Config.Bridge.ManagementRoomText.WelcomeConnected)
+		} else {
+			_, _ = mx.sendNoticeWithMarkdown(evt.RoomID, mx.bridge.Config.Bridge.ManagementRoomText.WelcomeUnconnected)
+		}
+
+		additionalHelp := mx.bridge.Config.Bridge.ManagementRoomText.AdditionalHelp
+		if len(additionalHelp) > 0 {
+			_, _ = mx.sendNoticeWithMarkdown(evt.RoomID, additionalHelp)
+		}
 	}
 }
 
@@ -201,13 +209,10 @@ func (mx *MatrixHandler) createPrivatePortalFromInvite(roomID id.RoomID, inviter
 	portal.UpdateBridgeInfo()
 	_, _ = intent.SendNotice(roomID, "Private chat portal created")
 
-	err := portal.FillInitialHistory(inviter)
-	if err != nil {
-		portal.log.Errorln("Failed to fill history:", err)
-	}
-
-	inviter.addPortalToCommunity(portal)
-	inviter.addPuppetToCommunity(puppet)
+	//err := portal.FillInitialHistory(inviter)
+	//if err != nil {
+	//	portal.log.Errorln("Failed to fill history:", err)
+	//}
 }
 
 func (mx *MatrixHandler) HandlePuppetInvite(evt *event.Event, inviter *User, puppet *Puppet) {
@@ -259,7 +264,7 @@ func (mx *MatrixHandler) HandleMembership(evt *event.Event) {
 	}
 
 	user := mx.bridge.GetUserByMXID(evt.Sender)
-	if user == nil || !user.Whitelisted || !user.IsConnected() {
+	if user == nil || !user.Whitelisted || !user.IsLoggedIn() {
 		return
 	}
 
@@ -275,16 +280,15 @@ func (mx *MatrixHandler) HandleMembership(evt *event.Event) {
 	isSelf := id.UserID(evt.GetStateKey()) == evt.Sender
 
 	if content.Membership == event.MembershipLeave {
-		if isSelf {
-			if evt.Unsigned.PrevContent != nil {
-				_ = evt.Unsigned.PrevContent.ParseRaw(evt.Type)
-				prevContent, ok := evt.Unsigned.PrevContent.Parsed.(*event.MemberEventContent)
-				if ok {
-					if portal.IsPrivateChat() || prevContent.Membership == "join" {
-						portal.HandleMatrixLeave(user)
-					}
-				}
+		if evt.Unsigned.PrevContent != nil {
+			_ = evt.Unsigned.PrevContent.ParseRaw(evt.Type)
+			prevContent, ok := evt.Unsigned.PrevContent.Parsed.(*event.MemberEventContent)
+			if ok && prevContent.Membership != "join" {
+				return
 			}
+		}
+		if isSelf {
+			portal.HandleMatrixLeave(user)
 		} else {
 			portal.HandleMatrixKick(user, evt)
 		}
@@ -300,7 +304,7 @@ func (mx *MatrixHandler) HandleRoomMetadata(evt *event.Event) {
 	}
 
 	user := mx.bridge.GetUserByMXID(evt.Sender)
-	if user == nil || !user.Whitelisted || !user.IsConnected() {
+	if user == nil || !user.Whitelisted || !user.IsLoggedIn() {
 		return
 	}
 
@@ -316,12 +320,11 @@ func (mx *MatrixHandler) shouldIgnoreEvent(evt *event.Event) bool {
 	if _, isPuppet := mx.bridge.ParsePuppetMXID(evt.Sender); evt.Sender == mx.bridge.Bot.UserID || isPuppet {
 		return true
 	}
-	isCustomPuppet, ok := evt.Content.Raw["net.maunium.whatsapp.puppet"].(bool)
-	if ok && isCustomPuppet && mx.bridge.GetPuppetByCustomMXID(evt.Sender) != nil {
+	if val, ok := evt.Content.Raw[doublePuppetKey]; ok && val == doublePuppetValue && mx.bridge.GetPuppetByCustomMXID(evt.Sender) != nil {
 		return true
 	}
 	user := mx.bridge.GetUserByMXID(evt.Sender)
-	if !user.RelaybotWhitelisted {
+	if !user.RelayWhitelisted {
 		return true
 	}
 	return false
@@ -336,32 +339,41 @@ func (mx *MatrixHandler) HandleEncrypted(evt *event.Event) {
 	}
 
 	decrypted, err := mx.bridge.Crypto.Decrypt(evt)
+	decryptionRetryCount := 0
 	if errors.Is(err, NoSessionFound) {
 		content := evt.Content.AsEncrypted()
 		mx.log.Debugfln("Couldn't find session %s trying to decrypt %s, waiting %d seconds...", content.SessionID, evt.ID, int(sessionWaitTimeout.Seconds()))
+		mx.as.SendErrorMessageSendCheckpoint(evt, appservice.StepDecrypted, err, false, decryptionRetryCount)
+		decryptionRetryCount++
 		if mx.bridge.Crypto.WaitForSession(evt.RoomID, content.SenderKey, content.SessionID, sessionWaitTimeout) {
 			mx.log.Debugfln("Got session %s after waiting, trying to decrypt %s again", content.SessionID, evt.ID)
 			decrypted, err = mx.bridge.Crypto.Decrypt(evt)
 		} else {
+			mx.as.SendErrorMessageSendCheckpoint(evt, appservice.StepDecrypted, fmt.Errorf("didn't receive encryption keys"), false, decryptionRetryCount)
 			go mx.waitLongerForSession(evt)
 			return
 		}
 	}
 	if err != nil {
+		mx.as.SendErrorMessageSendCheckpoint(evt, appservice.StepDecrypted, err, true, decryptionRetryCount)
+
 		mx.log.Warnfln("Failed to decrypt %s: %v", evt.ID, err)
 		_, _ = mx.bridge.Bot.SendNotice(evt.RoomID, fmt.Sprintf(
 			"\u26a0 Your message was not bridged: %v", err))
 		return
 	}
+	mx.as.SendMessageSendCheckpoint(decrypted, appservice.StepDecrypted, decryptionRetryCount)
 	mx.bridge.EventProcessor.Dispatch(decrypted)
 }
 
 func (mx *MatrixHandler) waitLongerForSession(evt *event.Event) {
-	const extendedTimeout = sessionWaitTimeout * 2
+	const extendedTimeout = sessionWaitTimeout * 3
 
 	content := evt.Content.AsEncrypted()
 	mx.log.Debugfln("Couldn't find session %s trying to decrypt %s, waiting %d more seconds...",
 		content.SessionID, evt.ID, int(extendedTimeout.Seconds()))
+
+	go mx.bridge.Crypto.RequestSession(evt.RoomID, content.SenderKey, content.SessionID, evt.Sender, content.DeviceID)
 
 	resp, err := mx.bridge.Bot.SendNotice(evt.RoomID, fmt.Sprintf(
 		"\u26a0 Your message was not bridged: the bridge hasn't received the decryption keys. "+
@@ -376,16 +388,19 @@ func (mx *MatrixHandler) waitLongerForSession(evt *event.Event) {
 		mx.log.Debugfln("Got session %s after waiting more, trying to decrypt %s again", content.SessionID, evt.ID)
 		decrypted, err := mx.bridge.Crypto.Decrypt(evt)
 		if err == nil {
+			mx.as.SendMessageSendCheckpoint(decrypted, appservice.StepDecrypted, 2)
 			mx.bridge.EventProcessor.Dispatch(decrypted)
 			_, _ = mx.bridge.Bot.RedactEvent(evt.RoomID, resp.EventID)
 			return
 		}
-		mx.log.Warnfln("Failed to decrypt %s: %v", err)
+		mx.log.Warnfln("Failed to decrypt %s: %v", evt.ID, err)
+		mx.as.SendErrorMessageSendCheckpoint(evt, appservice.StepDecrypted, err, true, 2)
 		update.Body = fmt.Sprintf("\u26a0 Your message was not bridged: %v", err)
 	} else {
 		mx.log.Debugfln("Didn't get %s, giving up on %s", content.SessionID, evt.ID)
+		mx.as.SendErrorMessageSendCheckpoint(evt, appservice.StepDecrypted, fmt.Errorf("didn't receive encryption keys"), true, 2)
 		update.Body = "\u26a0 Your message was not bridged: the bridge hasn't received the decryption keys. " +
-			"If this keeps happening, try restarting your client."
+			"If this error keeps happening, try restarting your client."
 	}
 
 	newContent := update
@@ -396,7 +411,10 @@ func (mx *MatrixHandler) waitLongerForSession(evt *event.Event) {
 			EventID: resp.EventID,
 		}
 	}
-	_, _ = mx.bridge.Bot.SendMessageEvent(evt.RoomID, event.EventMessage, &update)
+	_, err = mx.bridge.Bot.SendMessageEvent(evt.RoomID, event.EventMessage, &update)
+	if err != nil {
+		mx.log.Debugfln("Failed to update decryption error notice %s: %v", resp.EventID, err)
+	}
 }
 
 func (mx *MatrixHandler) HandleMessage(evt *event.Event) {
@@ -406,7 +424,12 @@ func (mx *MatrixHandler) HandleMessage(evt *event.Event) {
 	}
 
 	user := mx.bridge.GetUserByMXID(evt.Sender)
+	if user == nil {
+		return
+	}
+
 	content := evt.Content.AsMessage()
+	content.RemoveReplyFallback()
 	if user.Whitelisted && content.MsgType == event.MsgText {
 		commandPrefix := mx.bridge.Config.Bridge.CommandPrefix
 		hasCommandPrefix := strings.HasPrefix(content.Body, commandPrefix)
@@ -414,42 +437,105 @@ func (mx *MatrixHandler) HandleMessage(evt *event.Event) {
 			content.Body = strings.TrimLeft(content.Body[len(commandPrefix):], " ")
 		}
 		if hasCommandPrefix || evt.RoomID == user.ManagementRoom {
-			mx.cmd.Handle(evt.RoomID, user, content.Body)
+			mx.cmd.Handle(evt.RoomID, user, content.Body, content.GetReplyTo())
 			return
 		}
 	}
 
 	portal := mx.bridge.GetPortalByMXID(evt.RoomID)
 	if portal != nil && (user.Whitelisted || portal.HasRelaybot()) {
-		portal.HandleMatrixMessage(user, evt)
+		portal.matrixMessages <- PortalMatrixMessage{user: user, evt: evt}
+	}
+}
+
+func (mx *MatrixHandler) HandleReaction(evt *event.Event) {
+	defer mx.bridge.Metrics.TrackMatrixEvent(evt.Type)()
+	if mx.shouldIgnoreEvent(evt) {
+		return
+	}
+
+	user := mx.bridge.GetUserByMXID(evt.Sender)
+	if user == nil || !user.RelayWhitelisted {
+		return
+	}
+
+	portal := mx.bridge.GetPortalByMXID(evt.RoomID)
+	if portal != nil && (user.Whitelisted || portal.HasRelaybot()) && mx.bridge.Config.Bridge.ReactionNotices {
+		_, _ = portal.sendMainIntentMessage(&event.MessageEventContent{
+			MsgType: event.MsgNotice,
+			Body:    fmt.Sprintf("\u26a0 Reactions are not yet supported by WhatsApp."),
+		})
 	}
 }
 
 func (mx *MatrixHandler) HandleRedaction(evt *event.Event) {
 	defer mx.bridge.Metrics.TrackMatrixEvent(evt.Type)()
-	if _, isPuppet := mx.bridge.ParsePuppetMXID(evt.Sender); evt.Sender == mx.bridge.Bot.UserID || isPuppet {
-		return
-	}
 
 	user := mx.bridge.GetUserByMXID(evt.Sender)
-
-	if !user.Whitelisted {
-		return
-	}
-
-	if !user.HasSession() {
-		return
-	} else if !user.IsConnected() {
-		msg := format.RenderMarkdown(fmt.Sprintf("[%[1]s](https://matrix.to/#/%[1]s): \u26a0 "+
-			"You are not connected to WhatsApp, so your redaction was not bridged. "+
-			"Use `%[2]s reconnect` to reconnect.", user.MXID, mx.bridge.Config.Bridge.CommandPrefix), true, false)
-		msg.MsgType = event.MsgNotice
-		_, _ = mx.bridge.Bot.SendMessageEvent(evt.RoomID, event.EventMessage, msg)
+	if user == nil {
 		return
 	}
 
 	portal := mx.bridge.GetPortalByMXID(evt.RoomID)
-	if portal != nil {
-		portal.HandleMatrixRedaction(user, evt)
+	if portal != nil && (user.Whitelisted || portal.HasRelaybot()) {
+		portal.matrixMessages <- PortalMatrixMessage{user: user, evt: evt}
 	}
+}
+
+func (mx *MatrixHandler) HandlePresence(evt *event.Event) {
+	user := mx.bridge.GetUserByMXIDIfExists(evt.Sender)
+	if user == nil || !user.IsLoggedIn() {
+		return
+	}
+	customPuppet := mx.bridge.GetPuppetByCustomMXID(user.MXID)
+	// TODO move this flag to the user and/or portal data
+	if customPuppet != nil && !customPuppet.EnablePresence {
+		return
+	}
+
+	presence := types.PresenceAvailable
+	if evt.Content.AsPresence().Presence != event.PresenceOnline {
+		presence = types.PresenceUnavailable
+		user.log.Debugln("Marking offline")
+	} else {
+		user.log.Debugln("Marking online")
+	}
+	user.lastPresence = presence
+	if user.Client.Store.PushName != "" {
+		err := user.Client.SendPresence(presence)
+		if err != nil {
+			user.log.Warnln("Failed to set presence:", err)
+		}
+	}
+}
+
+func (mx *MatrixHandler) HandleReceipt(evt *event.Event) {
+	portal := mx.bridge.GetPortalByMXID(evt.RoomID)
+	if portal == nil {
+		return
+	}
+
+	for eventID, receipts := range *evt.Content.AsReceipt() {
+		for userID, receipt := range receipts.Read {
+			if user := mx.bridge.GetUserByMXIDIfExists(userID); user == nil {
+				// Not a bridge user
+			} else if customPuppet := mx.bridge.GetPuppetByCustomMXID(user.MXID); customPuppet != nil && !customPuppet.EnableReceipts {
+				// TODO move this flag to the user and/or portal data
+				continue
+			} else if val, ok := receipt.Extra[doublePuppetKey].(string); ok && customPuppet != nil && val == doublePuppetValue {
+				// Ignore double puppeted read receipts.
+				user.log.Debugfln("Ignoring double puppeted read receipt %+v", evt.Content.Raw)
+			} else {
+				portal.HandleMatrixReadReceipt(user, eventID, time.UnixMilli(receipt.Timestamp))
+			}
+		}
+	}
+}
+
+func (mx *MatrixHandler) HandleTyping(evt *event.Event) {
+	portal := mx.bridge.GetPortalByMXID(evt.RoomID)
+	if portal == nil {
+		return
+	}
+	portal.HandleMatrixTyping(evt.Content.AsTyping().UserIDs)
 }

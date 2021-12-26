@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// +build cgo,!nocrypto
+//go:build cgo && !nocrypto
 
 package main
 
@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"runtime/debug"
 	"time"
+
+	"github.com/lib/pq"
 
 	"maunium.net/go/maulogger/v2"
 
@@ -36,7 +38,7 @@ import (
 var NoSessionFound = crypto.NoSessionFound
 
 var levelTrace = maulogger.Level{
-	Name:     "Trace",
+	Name:     "TRACE",
 	Severity: -10,
 	Color:    -1,
 }
@@ -48,6 +50,10 @@ type CryptoHelper struct {
 	store   *database.SQLCryptoStore
 	log     maulogger.Logger
 	baseLog maulogger.Logger
+}
+
+func init() {
+	crypto.PostgresArrayWrapper = pq.Array
 }
 
 func NewCryptoHelper(bridge *Bridge) Crypto {
@@ -100,7 +106,8 @@ func (helper *CryptoHelper) allowKeyShare(device *crypto.DeviceIdentity, info ev
 			return &crypto.KeyShareRejection{Code: event.RoomKeyWithheldUnavailable, Reason: "Requested room is not a portal room"}
 		}
 		user := helper.bridge.GetUserByMXID(device.UserID)
-		if !user.Admin && !user.IsInPortal(portal.Key) {
+		// FIXME reimplement IsInPortal
+		if !user.Admin /*&& !user.IsInPortal(portal.Key)*/ {
 			helper.log.Debugfln("Rejecting key request for %s from %s/%s: user is not in portal", info.SessionID, device.UserID, device.DeviceID)
 			return &crypto.KeyShareRejection{Code: event.RoomKeyWithheldUnauthorized, Reason: "You're not in that portal"}
 		}
@@ -127,14 +134,15 @@ func (helper *CryptoHelper) loginBot() (*mautrix.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get supported login flows: %w", err)
 	}
-	if !flows.HasFlow(mautrix.AuthTypeHalfyAppservice) {
+	flow := flows.FirstFlowOfType(mautrix.AuthTypeAppservice, mautrix.AuthTypeHalfyAppservice)
+	if flow == nil {
 		return nil, fmt.Errorf("homeserver does not support appservice login")
 	}
 	// We set the API token to the AS token here to authenticate the appservice login
 	// It'll get overridden after the login
 	client.AccessToken = helper.bridge.AS.Registration.AppToken
 	resp, err := client.Login(&mautrix.ReqLogin{
-		Type:                     mautrix.AuthTypeHalfyAppservice,
+		Type:                     flow.Type,
 		Identifier:               mautrix.UserIdentifier{Type: mautrix.IdentifierTypeUser, User: string(helper.bridge.AS.BotMXID())},
 		DeviceID:                 deviceID,
 		InitialDeviceDisplayName: "WhatsApp Bridge",
@@ -191,6 +199,15 @@ func (helper *CryptoHelper) Encrypt(roomID id.RoomID, evtType event.Type, conten
 
 func (helper *CryptoHelper) WaitForSession(roomID id.RoomID, senderKey id.SenderKey, sessionID id.SessionID, timeout time.Duration) bool {
 	return helper.mach.WaitForSession(roomID, senderKey, sessionID, timeout)
+}
+
+func (helper *CryptoHelper) RequestSession(roomID id.RoomID, senderKey id.SenderKey, sessionID id.SessionID, userID id.UserID, deviceID id.DeviceID) {
+	err := helper.mach.SendRoomKeyRequest(roomID, senderKey, sessionID, "", map[id.UserID][]id.DeviceID{userID: {deviceID}})
+	if err != nil {
+		helper.log.Warnfln("Failed to send key request to %s/%s for %s in %s: %v", userID, deviceID, sessionID, roomID, err)
+	} else {
+		helper.log.Debugfln("Sent key request to %s/%s for %s in %s", userID, deviceID, sessionID, roomID)
+	}
 }
 
 func (helper *CryptoHelper) ResetSession(roomID id.RoomID) {

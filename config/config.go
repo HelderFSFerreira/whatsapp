@@ -17,20 +17,23 @@
 package config
 
 import (
-	"io/ioutil"
+	"fmt"
 
-	"gopkg.in/yaml.v2"
-	"maunium.net/go/mautrix/id"
+	"gopkg.in/yaml.v3"
 
 	"maunium.net/go/mautrix/appservice"
+	"maunium.net/go/mautrix/id"
 )
+
+var ExampleConfig string
 
 type Config struct {
 	Homeserver struct {
-		Address        string `yaml:"address"`
-		Domain         string `yaml:"domain"`
-		Asmux          bool   `yaml:"asmux"`
-		StatusEndpoint string `yaml:"status_endpoint"`
+		Address                       string `yaml:"address"`
+		Domain                        string `yaml:"domain"`
+		Asmux                         bool   `yaml:"asmux"`
+		StatusEndpoint                string `yaml:"status_endpoint"`
+		MessageSendCheckpointEndpoint string `yaml:"message_send_checkpoint_endpoint"`
 	} `yaml:"homeserver"`
 
 	AppService struct {
@@ -46,8 +49,6 @@ type Config struct {
 			MaxIdleConns int `yaml:"max_idle_conns"`
 		} `yaml:"database"`
 
-		StateStore string `yaml:"state_store_path,omitempty"`
-
 		Provisioning struct {
 			Prefix       string `yaml:"prefix"`
 			SharedSecret string `yaml:"shared_secret"`
@@ -59,6 +60,8 @@ type Config struct {
 			Displayname string `yaml:"displayname"`
 			Avatar      string `yaml:"avatar"`
 		} `yaml:"bot"`
+
+		EphemeralEvents bool `yaml:"ephemeral_events"`
 
 		ASToken string `yaml:"as_token"`
 		HSToken string `yaml:"hs_token"`
@@ -79,43 +82,39 @@ type Config struct {
 	Logging appservice.LogConfig `yaml:"logging"`
 }
 
-func (config *Config) CanDoublePuppet(userID id.UserID) bool {
-	if len(config.Bridge.LoginSharedSecret) == 0 {
-		// Automatic login not enabled
+func (config *Config) CanAutoDoublePuppet(userID id.UserID) bool {
+	_, homeserver, _ := userID.Parse()
+	_, hasSecret := config.Bridge.LoginSharedSecretMap[homeserver]
+	return hasSecret
+}
+
+func (config *Config) CanDoublePuppetBackfill(userID id.UserID) bool {
+	if !config.Bridge.HistorySync.DoublePuppetBackfill {
 		return false
-	} else if _, homeserver, _ := userID.Parse(); homeserver != config.Homeserver.Domain {
-		// user is on another homeserver
+	}
+	_, homeserver, _ := userID.Parse()
+	// Batch sending can only use local users, so don't allow double puppets on other servers.
+	if homeserver != config.Homeserver.Domain {
 		return false
 	}
 	return true
 }
 
-func (config *Config) setDefaults() {
-	config.AppService.Database.MaxOpenConns = 20
-	config.AppService.Database.MaxIdleConns = 2
-	config.WhatsApp.OSName = "Mautrix-WhatsApp bridge"
-	config.WhatsApp.BrowserName = "mx-wa"
-	config.Bridge.setDefaults()
-}
-
-func Load(path string) (*Config, error) {
-	data, err := ioutil.ReadFile(path)
+func Load(data []byte, upgraded bool) (*Config, error) {
+	var config = &Config{}
+	if !upgraded {
+		// Fallback: if config upgrading failed, load example config for base values
+		err := yaml.Unmarshal([]byte(ExampleConfig), config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal example config: %w", err)
+		}
+	}
+	err := yaml.Unmarshal(data, config)
 	if err != nil {
 		return nil, err
 	}
 
-	var config = &Config{}
-	config.setDefaults()
-	err = yaml.Unmarshal(data, config)
 	return config, err
-}
-
-func (config *Config) Save(path string) error {
-	data, err := yaml.Marshal(config)
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(path, data, 0600)
 }
 
 func (config *Config) MakeAppService() (*appservice.AppService, error) {
@@ -124,6 +123,7 @@ func (config *Config) MakeAppService() (*appservice.AppService, error) {
 	as.HomeserverURL = config.Homeserver.Address
 	as.Host.Hostname = config.AppService.Hostname
 	as.Host.Port = config.AppService.Port
+	as.MessageSendCheckpointEndpoint = config.Homeserver.MessageSendCheckpointEndpoint
 	as.DefaultHTTPRetries = 4
 	var err error
 	as.Registration, err = config.GetRegistration()

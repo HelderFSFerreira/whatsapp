@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// +build cgo,!nocrypto
+//go:build cgo && !nocrypto
 
 package database
 
@@ -83,7 +83,7 @@ type cryptoLogger struct {
 }
 
 var levelTrace = log.Level{
-	Name:     "Trace",
+	Name:     "TRACE",
 	Severity: -10,
 	Color:    -1,
 }
