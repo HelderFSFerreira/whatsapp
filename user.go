@@ -666,6 +666,7 @@ func (user *User) handleLoggedOut(onConnect bool) {
 	user.sendBridgeState(BridgeState{StateEvent: StateBadCredentials, Error: WANotLoggedIn})
 }
 
+
 func (user *User) GetPortalByMessageSource(ms types.MessageSource) *Portal {
 	jid := ms.Chat
 	if ms.IsIncomingBroadcast() {

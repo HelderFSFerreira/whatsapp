@@ -97,6 +97,8 @@ type BridgeConfig struct {
 
 	usernameTemplate    *template.Template `yaml:"-"`
 	displaynameTemplate *template.Template `yaml:"-"`
+	communityTemplate   *template.Template `yaml:"-"`
+	spacesTemplate      *template.Template `yaml:"-"`
 }
 
 type umBridgeConfig BridgeConfig
@@ -159,6 +161,7 @@ func (bc BridgeConfig) FormatDisplayname(jid types.JID, contact types.ContactInf
 	}
 	return buf.String(), quality
 }
+
 
 func (bc BridgeConfig) FormatUsername(username string) string {
 	var buf strings.Builder
