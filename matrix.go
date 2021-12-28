@@ -131,6 +131,7 @@ func (mx *MatrixHandler) HandleBotInvite(evt *event.Event) {
 
 	if len(members.Joined) == 2 && (len(user.ManagementRoom) == 0 || evt.Content.AsMember().IsDirect) {
 		user.SetManagementRoom(evt.RoomID)
+		user.CreateAndSetManagementSpace()
 		_, _ = intent.SendNotice(user.ManagementRoom, "This room has been registered as your bridge management/status room.")
 		mx.log.Debugln(evt.RoomID, "registered as a management room with", evt.Sender)
 	}

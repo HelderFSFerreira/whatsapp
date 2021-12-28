@@ -159,6 +159,7 @@ func (bridge *Bridge) loadDBUser(dbUser *database.User, mxid *id.UserID) *User {
 	}
 	if len(user.ManagementRoom) > 0 {
 		bridge.managementRooms[user.ManagementRoom] = user
+		bridge.managementSpaces[user.ManagementSpace] = user
 	}
 	return user
 }
@@ -200,6 +201,8 @@ func (user *User) GetManagementRoom() id.RoomID {
 		} else {
 			user.SetManagementRoom(resp.RoomID)
 		}
+		// create management space
+		user.CreateAndSetManagementSpace()
 	}
 	return user.ManagementRoom
 }
@@ -214,6 +217,40 @@ func (user *User) SetManagementRoom(roomID id.RoomID) {
 	user.ManagementRoom = roomID
 	user.bridge.managementRooms[user.ManagementRoom] = user
 	user.Update()
+}
+
+func (user *User) SetManagementSpace(spaceID id.RoomID) {
+	existingUser, ok := user.bridge.managementSpaces[spaceID]
+	if ok {
+		existingUser.ManagementSpace = ""
+		existingUser.Update()
+	}
+
+	user.ManagementSpace = spaceID
+	user.bridge.managementSpaces[user.ManagementSpace] = user
+	user.Update()
+}
+
+func (user *User) CreateAndSetManagementSpace() {
+	var invite []id.UserID
+	invite = append(invite, user.User.MXID)
+	creationContent := make(map[string]interface{})
+	creationContent["type"] = "m.space"
+	if !user.bridge.Config.Bridge.FederateRooms {
+		creationContent["m.federate"] = false
+	}
+	resp, err := user.bridge.Bot.CreateRoom(&mautrix.ReqCreateRoom{
+		Visibility:      "private",
+		Name:            "WhatsApp",
+		Topic:           "WhatsApp Bridge",
+		Invite:          invite,
+		CreationContent: creationContent,
+	})
+	if err != nil {
+		user.log.Errorln("Failed to auto-create management space-room:", err)
+	} else {
+		user.SetManagementSpace(resp.RoomID)
+	}
 }
 
 type waLogger struct{ l log.Logger }

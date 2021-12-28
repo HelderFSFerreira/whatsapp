@@ -38,7 +38,7 @@ func (uq *UserQuery) New() *User {
 }
 
 func (uq *UserQuery) GetAll() (users []*User) {
-	rows, err := uq.db.Query(`SELECT mxid, username, agent, device, management_room FROM "user"`)
+	rows, err := uq.db.Query(`SELECT mxid, username, agent, device, management_room, management_space FROM "user"`)
 	if err != nil || rows == nil {
 		return nil
 	}
@@ -50,7 +50,7 @@ func (uq *UserQuery) GetAll() (users []*User) {
 }
 
 func (uq *UserQuery) GetByMXID(userID id.UserID) *User {
-	row := uq.db.QueryRow(`SELECT mxid, username, agent, device, management_room FROM "user" WHERE mxid=$1`, userID)
+	row := uq.db.QueryRow(`SELECT mxid, username, agent, device, management_room, management_space FROM "user" WHERE mxid=$1`, userID)
 	if row == nil {
 		return nil
 	}
@@ -58,7 +58,7 @@ func (uq *UserQuery) GetByMXID(userID id.UserID) *User {
 }
 
 func (uq *UserQuery) GetByUsername(username string) *User {
-	row := uq.db.QueryRow(`SELECT mxid, username, agent, device, management_room FROM "user" WHERE username=$1`, username)
+	row := uq.db.QueryRow(`SELECT mxid, username, agent, device, management_room, management_space FROM "user" WHERE username=$1`, username)
 	if row == nil {
 		return nil
 	}
@@ -69,15 +69,16 @@ type User struct {
 	db  *Database
 	log log.Logger
 
-	MXID           id.UserID
-	JID            types.JID
-	ManagementRoom id.RoomID
+	MXID            id.UserID
+	JID             types.JID
+	ManagementRoom  id.RoomID
+	ManagementSpace id.RoomID
 }
 
 func (user *User) Scan(row Scannable) *User {
 	var username sql.NullString
 	var device, agent sql.NullByte
-	err := row.Scan(&user.MXID, &username, &agent, &device, &user.ManagementRoom)
+	err := row.Scan(&user.MXID, &username, &agent, &device, &user.ManagementRoom, &user.ManagementSpace)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			user.log.Errorln("Database scan failed:", err)
@@ -112,16 +113,16 @@ func (user *User) devicePtr() *uint8 {
 }
 
 func (user *User) Insert() {
-	_, err := user.db.Exec(`INSERT INTO "user" (mxid, username, agent, device, management_room) VALUES ($1, $2, $3, $4, $5)`,
-		user.MXID, user.usernamePtr(), user.agentPtr(), user.devicePtr(), user.ManagementRoom)
+	_, err := user.db.Exec(`INSERT INTO "user" (mxid, username, agent, device, management_room, management_space) VALUES ($1, $2, $3, $4, $5, $6)`,
+		user.MXID, user.usernamePtr(), user.agentPtr(), user.devicePtr(), user.ManagementRoom, user.ManagementSpace)
 	if err != nil {
 		user.log.Warnfln("Failed to insert %s: %v", user.MXID, err)
 	}
 }
 
 func (user *User) Update() {
-	_, err := user.db.Exec(`UPDATE "user" SET username=$1, agent=$2, device=$3, management_room=$4 WHERE mxid=$5`,
-		user.usernamePtr(), user.agentPtr(), user.devicePtr(), user.ManagementRoom, user.MXID)
+	_, err := user.db.Exec(`UPDATE "user" SET username=$1, agent=$2, device=$3, management_room=$4, management_space=$5 WHERE mxid=$6`,
+		user.usernamePtr(), user.agentPtr(), user.devicePtr(), user.ManagementRoom, user.ManagementSpace, user.MXID)
 	if err != nil {
 		user.log.Warnfln("Failed to update %s: %v", user.MXID, err)
 	}
