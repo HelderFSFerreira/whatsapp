@@ -1070,6 +1070,11 @@ func (portal *Portal) CreateMatrixRoom(user *User, groupInfo *types.GroupInfo, i
 	}
 
 	bridgeInfoStateKey, bridgeInfo := portal.getBridgeInfo()
+	parentSpaceContent := make(map[string]interface{})
+	parentSpaceContent["via"] = []string{strings.SplitN(portal.bridge.Bot.UserID.String(), ":", 2)[1]}
+	parentSpaceContent["canonical"] = true
+
+	spaceRoomID := user.ManagementSpace.String()
 
 	initialState := []*event.Event{{
 		Type: event.StatePowerLevels,
@@ -1085,6 +1090,10 @@ func (portal *Portal) CreateMatrixRoom(user *User, groupInfo *types.GroupInfo, i
 		Type:     event.StateHalfShotBridge,
 		Content:  event.Content{Parsed: bridgeInfo},
 		StateKey: &bridgeInfoStateKey,
+	}, {
+		Type:     event.Type{Type: "m.space.parent", Class: event.StateEventType},
+		Content:  event.Content{Raw: parentSpaceContent},
+		StateKey: &spaceRoomID,
 	}}
 	if !portal.AvatarURL.IsEmpty() {
 		initialState = append(initialState, &event.Event{
@@ -1141,6 +1150,8 @@ func (portal *Portal) CreateMatrixRoom(user *User, groupInfo *types.GroupInfo, i
 	portal.ensureUserInvited(user)
 	user.syncChatDoublePuppetDetails(portal, true)
 
+	portal.addToSpace(user.GetManagementRoom(), portal.MXID)
+
 	if groupInfo != nil {
 		portal.SyncParticipants(user, groupInfo)
 		if groupInfo.IsAnnounce {
@@ -1174,6 +1185,18 @@ func (portal *Portal) CreateMatrixRoom(user *User, groupInfo *types.GroupInfo, i
 		portal.Update()
 	}
 	return nil
+}
+
+func (portal *Portal) addToSpace(spaceID id.RoomID, portalID id.RoomID) {
+
+	parentSpaceContent := make(map[string]interface{})
+	parentSpaceContent["via"] = []string{strings.SplitN(portal.bridge.Bot.UserID.String(), ":", 2)[1]}
+
+	portal.log.Infoln("adding room " + portalID + " to the space " + spaceID)
+	_, err := portal.MainIntent().SendStateEvent(spaceID, event.Type{Type: "m.space.child", Class: event.StateEventType}, portalID.String(), parentSpaceContent)
+	if err != nil {
+		portal.log.Errorln("Failed add portal as child:", err)
+	}
 }
 
 func (portal *Portal) IsPrivateChat() bool {

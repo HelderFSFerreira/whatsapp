@@ -180,6 +180,7 @@ type Bridge struct {
 	usersByUsername     map[string]*User
 	usersLock           sync.Mutex
 	managementRooms     map[id.RoomID]*User
+	managementSpaces    map[id.RoomID]*User
 	managementRoomsLock sync.Mutex
 	portalsByMXID       map[id.RoomID]*Portal
 	portalsByJID        map[database.PortalKey]*Portal
@@ -480,6 +481,7 @@ func main() {
 		usersByMXID:         make(map[id.UserID]*User),
 		usersByUsername:     make(map[string]*User),
 		managementRooms:     make(map[id.RoomID]*User),
+		managementSpaces:    make(map[id.RoomID]*User),
 		portalsByMXID:       make(map[id.RoomID]*Portal),
 		portalsByJID:        make(map[database.PortalKey]*Portal),
 		puppets:             make(map[types.JID]*Puppet),
